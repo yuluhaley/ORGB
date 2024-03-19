@@ -1,0 +1,132 @@
+---
+title: "orgb e1"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-03-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(tidygraph)
+library(igraph)
+library(tidyr) 
+library(purrr)
+
+```
+
+## Data
+
+```{r data}
+library(readr)
+connections <- read.csv("~/Desktop/orgb/Connections.csv")
+#drop email column because of missing value
+connections <- connections %>% select(-`Email.Address`)
+```
+
+## Contacts count by current employer/ contact of each company count
+
+```{r current employer}
+contacts_count <- connections %>%
+  group_by(Company) %>%
+  summarise(Count = n())
+
+#print number
+print(contacts_count)
+
+```
+
+#Total Contacts Count
+```{r total contacts}
+total_count <- nrow(connections)
+print(paste("Total contacts:", total_count))
+
+```
+
+#Create Nodes and Edges
+```{r nodes and edges}
+# node
+nodes <- connections %>%
+  transmute(id = row_number(),
+            label = paste(`First.Name`, substr(iconv(`Last.Name`, "UTF-8", "ASCII//TRANSLIT//IGNORE"), 1, 1), sep = " "))
+
+
+# edges
+edges <- connections %>%
+  mutate(id = row_number()) %>%  # Generate a id for each row
+  select(id, Company) %>%
+  group_by(Company) %>%
+  filter(n() > 1) %>%
+  summarise(pairs = list(combn(id, 2, simplify = FALSE))) %>%
+  unnest(pairs) %>%
+  transmute(from = map_dbl(pairs, 1), to = map_dbl(pairs, 2))
+
+```
+
+
+```{r visualization}
+library(ggraph)
+# tbl_graph object from nodes and edges
+network <- tbl_graph(nodes = nodes, edges = edges)
+
+# graph using tidygraph and visualize with ggraph
+ggraph(network, layout = 'fr') +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = label), repel = TRUE) +
+  theme_graph()
+
+# degree column that counts the number of connections each node has
+network <- network %>%
+  mutate(degree = centrality_degree())
+
+# Visualize the network with node size representing the degree
+ggraph(network, layout = 'fr') +
+  geom_edge_link(color = 'blue', alpha = 0.5) +
+  geom_node_point(aes(size = degree)) +
+  geom_node_text(aes(label = label), repel = TRUE, size = 3) +
+  theme_void()
+
+```
+
+
+#Mcgill Network
+```{r mcgill}
+# Filter Mcgill or Desautels networks
+filtered_connections <- connections %>%
+  filter(grepl("McGill|Desautels", Company))
+
+# nodes for Mcgill nwtwork
+filtered_nodes <- filtered_connections %>%
+  transmute(id = row_number(),
+            label = paste(`First.Name`, substr(iconv(`Last.Name`, "UTF-8", "ASCII//TRANSLIT//IGNORE"), 1, 1), sep = " "))
+
+
+# edges for Mcgill contacts
+filtered_edges <- filtered_connections %>%
+  mutate(id = row_number()) %>%
+  select(id, Company) %>%
+  group_by(Company) %>%
+  filter(n() > 1) %>%
+  summarise(pairs = list(combn(id, 2, simplify = FALSE))) %>%
+  unnest(pairs) %>%
+  transmute(from = map_dbl(pairs, 1), to = map_dbl(pairs, 2))
+
+#tbl_graph object from filtered nodes and edges
+filtered_network <- tbl_graph(nodes = filtered_nodes, edges = filtered_edges)
+
+# degree column that counts the number of connections each node has
+filtered_network <- filtered_network %>%
+  mutate(degree = centrality_degree())
+
+# Visualize the Mcgill network
+ggraph(filtered_network, layout = 'fr') +
+  geom_edge_link(color = 'blue', alpha = 0.5) +
+  geom_node_point(aes(size = degree)) +
+  geom_node_text(aes(label = label), repel = TRUE, size = 3) +
+  theme_void()
+
+
+```
