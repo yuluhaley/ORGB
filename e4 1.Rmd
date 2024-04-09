@@ -1,0 +1,214 @@
+---
+title: "e3"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-04-08"
+---
+
+
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(gender)
+library(wru)
+library(igraph)
+library(ggraph)
+library(gridExtra)
+library(arrow)
+library(readr)
+library(dplyr)
+library(tidyr)
+
+
+```
+
+Data loading and preprocessing
+
+```{r data}
+data_path <- "C:/Users/chens/Desktop/orgb/"
+applications <- read_parquet(paste0(data_path,"app_data_sample.parquet"))
+edges <- read_csv(paste0(data_path,"edges_sample.csv"))
+```
+
+demographics
+```{r demographic}
+
+# Gender
+
+examiner_names=applications %>% distinct(examiner_name_first)
+examiner_names_gender=examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(examiner_name_first = name, gender, proportion_female)
+
+# Join gender data back
+applications=applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+```
+
+```{r demographic2}
+# Race 
+
+examiner_surnames=applications %>% select(surname = examiner_name_last) %>% distinct()
+examiner_race=predict_race(voter.file = examiner_surnames, surname.only = T) %>% as_tibble()
+examiner_race=examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+# Join race data back
+applications=applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+```
+```{r demographic3}
+# Tenure 
+examiner_dates=applications %>% 
+  select(examiner_id, filing_date, appl_status_date)
+examiner_dates=examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+examiner_dates=examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+  ) %>% 
+  filter(year(latest_date)<2018)
+
+# Join tenure data back
+applications=applications %>% left_join(examiner_dates, by = "examiner_id")
+
+
+```
+
+processing time
+
+```{r processing-time}
+applications=applications %>%
+  mutate(
+    final_decision_date = coalesce(patent_issue_date, abandon_date),
+    app_proc_time = as.numeric(difftime(final_decision_date, filing_date, units = "days"))
+  )
+
+```
+
+
+Centrality measures
+
+```{r unique-ids}
+unique_examiner_ids=unique(c(edges$ego_examiner_id, edges$alter_examiner_id))
+
+g=graph_from_data_frame(edges[, c("ego_examiner_id", "alter_examiner_id")], directed = TRUE, vertices = data.frame(name = unique_examiner_ids))
+```
+
+```{r centrality}
+centrality_entire=data.frame(
+  examiner_id = V(g)$name,
+  degree_centrality = degree(g, mode = "out"),
+  betweenness_centrality = betweenness(g, directed = TRUE),
+  closeness_centrality = closeness(g, mode = "out")
+)
+
+centrality_entire$examiner_id=as.numeric(centrality_entire$examiner_id)
+
+applications=applications %>%
+  left_join(centrality_entire, by = "examiner_id")
+
+centrality_entire=data.frame(
+  examiner_id = V(g)$name,
+  degree_centrality = degree(g, mode = "out"),
+  betweenness_centrality = betweenness(g, directed = TRUE),
+  closeness_centrality = closeness(g, mode = "out")
+)
+
+centrality_entire$examiner_id=as.numeric(centrality_entire$examiner_id)
+
+applications=applications %>%
+  left_join(centrality_entire, by = "examiner_id")
+
+```
+
+
+
+```{r eda}
+# visualization
+ggplot(applications, aes(x = app_proc_time)) +
+  geom_histogram(binwidth = 30, fill = "blue", color = "pink") +
+  labs(title = "Histogram of Application Processing Time", x = "Processing Time (days)")
+
+```
+
+Regression Analysis
+
+
+```{r missingvalue, echo=FALSE}
+#remove missing value
+applications_clean=applications %>%
+  filter(!is.na(degree_centrality.x),
+         !is.na(betweenness_centrality.x),
+         !is.na(closeness_centrality.x))
+
+```
+
+linear regression model
+
+
+```{r lm}
+# Estimate the linear regression model with degree_centrality as the independent variable
+degree_model=lm(
+  app_proc_time ~ degree_centrality.x + gender + race + tenure_days,
+  data = applications_clean
+)
+
+summary(degree_model)
+
+```
+
+The degree_model has been constructed to explore the dynamics between an examiner's degree centrality in the USPTO advice network, demographic characteristics, and the time it takes to process patent applications. The model treats 'degree_centrality', 'gender', 'race', and 'tenure_days' as predictors of the 'app_proc_time', which is the outcome variable.
+
+An analysis of the model's performance reveals an adjusted R-squared value of 0.0053769. This statistic suggests that the model accounts for approximately 0.33% of the variability in the application processing time. In practical terms, while the model captures a positive association between the independent variables and the application processing time, the low adjusted R-squared indicates a relatively weak explanatory power. Such a small percentage points to the possibility that other unexamined factors might play a significant role in influencing 'app_proc_time'.
+
+The low explanatory power of this model raises questions about the potential complexities underlying the patent examination process that are not captured by the included variables. For instance, factors such as the complexity of the patent application, the field of invention, the workload of the examiners, and their interaction with the advice network may have significant impacts that are not encapsulated by the centrality measure alone. Moreover, individual differences between examiners, such as their decision-making style and efficiency, could also contribute to the variation in processing times, beyond what demographic factors can explain.
+
+
+relationship differ by examiner gender
+
+```{r degree_gender_interaction}
+# Degree centrality model with interaction
+degree_gender_interaction=lm(
+  app_proc_time ~ degree_centrality.x * gender + race + tenure_days,
+  data = applications_clean
+)
+summary(degree_gender_interaction)
+```
+The degree-gender interaction model presents a nuanced view of how gender may modify the relationship between an examiner's centrality in the USPTO network and their patent application processing times(Adjusted R-squared:  0.005557 ). The significant interaction term between degree centrality and gender points to a differential effect: while a higher degree centrality tends to be associated with longer processing times, this effect is not uniform across genders.
+
+Specifically, for male examiners, the influence of degree centrality on prolonging the application processing time is mitigated, as indicated by the negative coefficient of the interaction term. This suggests that male examiners with higher centrality—potentially indicating a more significant advisory role or greater involvement in complex cases—might not experience as much of an increase in processing time as their female counterparts with similar centrality levels.
+
+However, it's important to note that the model does not robustly explain the variance in processing times, given the low overall R-squared value. This implies that while the interaction between centrality and gender is statistically discernible, there are still many aspects of the processing time that remain unaccounted for by this model. Other factors, perhaps related to the institutional environment, the nature of the applications themselves, or the support systems in place for examiners, could be influential and warrant further investigation.
+
+The interaction effect observed prompts a deeper consideration of how structural and social factors within the USPTO might differentially affect the workflows of male and female examiners. It raises questions about the presence of potential gender-based differences in task allocation, access to resources, or the burden of informal roles that might not be immediately apparent from quantitative measures alone.
+
+
+Findings:
+The low adjusted R-squared value from the degree_model suggests that the factors included in the analysis—degree centrality, gender, race, and tenure days—offer limited predictive power for application processing times. This weak fit signals that the patent examination process is influenced by a complex interplay of factors beyond an examiner's network position and basic demographic characteristics. The USPTO may need to consider a broader range of variables to more accurately forecast processing times and identify areas for efficiency improvements.
+ 
+Although degree centrality has a quantifiable impact on processing times, its overall effect is small. This could imply that while network centrality captures some aspects of an examiner's role within the advice network, it does not necessarily translate into a large impact on their workflow efficiency. The USPTO could investigate the nature of these networks further to understand how to better leverage them for improved processing times.
+
+The significant interaction between degree centrality and gender highlights a differential impact on processing times, suggesting that gender may play a role in how network centrality affects examiners. For male examiners, higher centrality is associated with less of an increase in processing time than for female examiners. This could point to underlying gender dynamics within the workplace that affect job performance. Understanding these dynamics could be crucial for the USPTO in creating a more balanced work environment.
+
+
+
+
+
+
+
